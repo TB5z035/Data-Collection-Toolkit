@@ -294,7 +294,7 @@ ExportQueued --> Exported["exported to dataset"]
 6. `exported`
    The exporter writes the final dataset files:
    - Parquet episode table,
-   - MP4 camera files,
+   - camera video files encoded through PyAV,
    - dataset metadata updates.
 
 ## 8. Outputs

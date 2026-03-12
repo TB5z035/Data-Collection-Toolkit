@@ -14,16 +14,6 @@ cameras:
   id_path: pci-0000:f1:00.4-usb-0:2:1.0
   channel: color
   options: {}
-- name: cam_2
-  type: realsense
-  device: '335522070371'
-  width: 1280
-  height: 720
-  fps: 30
-  pixel_format: z16
-  id_path: ''
-  channel: depth
-  options: {}
 - name: cam_3
   type: realsense
   device: '335522070371'
@@ -80,10 +70,10 @@ teleop_pairs:
   follower: eef_g2_1
   mapper: joint_direct
 storage:
-  root: ~/rollio_data
+  root: ~/rollio_data_test
   lerobot_version: v2.1
 encoder:
-  video_codec: h264_nvenc
+  video_codec: libx264
   depth_codec: ffv1
   background_workers: 1
 upload:

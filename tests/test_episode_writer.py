@@ -2,86 +2,70 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
-import threading
 from pathlib import Path
 
-import numpy as np
 import pytest
+
+np = pytest.importorskip("numpy")
+av = pytest.importorskip("av")
 
 import rollio.episode.writer as writer_module
 from rollio.episode.codecs import get_depth_codec_option
 from rollio.episode.writer import LeRobotV21Writer
 
 
-def test_writer_does_not_deadlock_on_noisy_encoder_stderr(
+def test_writer_raises_clean_error_on_pyav_open_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    helper_path = tmp_path / "noisy_encoder.py"
-    helper_path.write_text(
-        "import sys\n"
-        "\n"
-        "while True:\n"
-        "    chunk = sys.stdin.buffer.read(4096)\n"
-        "    if not chunk:\n"
-        "        break\n"
-        "    sys.stderr.write('encoder failure\\n' * 512)\n"
-        "    sys.stderr.flush()\n"
-        "\n"
-        "raise SystemExit(1)\n",
-        encoding="utf-8",
-    )
-    real_popen = subprocess.Popen
-    child_processes: list[subprocess.Popen[bytes]] = []
+    def fake_open(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("boom")
 
-    def fake_popen(command, **kwargs):
-        del command
-        process = real_popen(
-            [sys.executable, str(helper_path)],
-            **kwargs,
-        )
-        child_processes.append(process)
-        return process
-
-    monkeypatch.setattr(writer_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(writer_module.av, "open", fake_open)
 
     writer = LeRobotV21Writer(
         root=tmp_path,
-        project_name="stderr_deadlock_guard",
+        project_name="pyav_error_guard",
         fps=10,
         camera_configs={},
         video_codec="libx264",
         depth_codec="ffv1",
     )
-    frames = [(0.0, np.zeros((512, 512), dtype=np.uint16))]
+    frames = [(0.0, np.zeros((32, 32), dtype=np.uint16))]
     codec = get_depth_codec_option("ffv1")
-    output_path = tmp_path / "episode_000000.mkv"
-    result: dict[str, Exception] = {}
 
-    def run_write() -> None:
-        try:
-            writer._write_video(  # pylint: disable=protected-access
-                output_path,
-                frames,
-                10,
-                codec,
-            )
-        except Exception as exc:  # pragma: no cover - assertion inspects captured value
-            result["error"] = exc
+    with pytest.raises(RuntimeError, match="PyAV failed while encoding"):
+        writer._write_video(  # pylint: disable=protected-access
+            tmp_path / "episode_000000.mkv",
+            frames,
+            10,
+            codec,
+        )
 
-    thread = threading.Thread(target=run_write, daemon=True)
-    thread.start()
-    thread.join(timeout=5.0)
 
-    if thread.is_alive():
-        for process in child_processes:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=5.0)
-        pytest.fail("Episode writer hung while the encoder filled stderr output.")
+def test_writer_encodes_depth_gray16le_frames(tmp_path: Path) -> None:
+    writer = LeRobotV21Writer(
+        root=tmp_path,
+        project_name="depth_encode",
+        fps=10,
+        camera_configs={},
+        video_codec="libx264",
+        depth_codec="ffv1",
+    )
+    frames = [
+        (0.0, np.zeros((24, 24), dtype=np.uint16)),
+        (0.1, np.ones((24, 24), dtype=np.uint16) * 1200),
+    ]
+    codec = get_depth_codec_option("ffv1")
+    out_path = tmp_path / "episode_000000.mkv"
 
-    error = result.get("error")
-    assert isinstance(error, RuntimeError)
-    assert "ffmpeg failed while encoding" in str(error)
+    writer._write_video(  # pylint: disable=protected-access
+        out_path,
+        frames,
+        10,
+        codec,
+    )
+
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0

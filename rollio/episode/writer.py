@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import tempfile
 from pathlib import Path
 
-import cv2
+import av
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -135,106 +133,48 @@ class LeRobotV21Writer:
         first_frame = np.asarray(frames[0][1])
         h, w = first_frame.shape[:2]
         input_pix_fmt = self._infer_input_pixel_format(first_frame)
-        output_pix_fmt = (
-            codec_option.output_pixel_format
-            if codec_option.kind == "rgb"
-            else input_pix_fmt
-        )
-        command = [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            input_pix_fmt,
-            "-s",
-            f"{w}x{h}",
-            "-r",
-            str(fps),
-            "-i",
-            "pipe:0",
-            "-an",
-            "-c:v",
-            codec_option.ffmpeg_codec,
-        ]
-        if output_pix_fmt:
-            command.extend(["-pix_fmt", output_pix_fmt])
-        command.extend(codec_option.ffmpeg_args)
-        command.append(str(path))
-        stderr = ""
-        write_error: OSError | None = None
+        stream_pix_fmt = codec_option.stream_pixel_format or input_pix_fmt
         try:
-            with tempfile.TemporaryFile() as stderr_file:
-                with subprocess.Popen(
-                    command,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=stderr_file,
-                ) as proc:
-                    try:
-                        for _, frame in frames:
-                            arr = np.asarray(frame)
-                            if arr.shape[:2] != (h, w):
-                                raise ValueError(
-                                    "All frames in one stream must share the same resolution"
-                                )
-                            if proc.stdin is None:
-                                raise RuntimeError("ffmpeg stdin was not created")
-                            proc.stdin.write(arr.tobytes())
-                    except OSError as exc:
-                        write_error = exc
-                    finally:
-                        if proc.stdin is not None:
-                            try:
-                                proc.stdin.close()
-                            except OSError as exc:
-                                if write_error is None:
-                                    write_error = exc
-                    return_code = proc.wait()
-                stderr_file.seek(0)
-                stderr = stderr_file.read().decode("utf-8", errors="replace")
-        except FileNotFoundError as exc:
-            if codec_option.kind == "rgb":
-                self._write_video_opencv(path, frames, fps)
-                return
-            raise RuntimeError("ffmpeg is required to export depth videos") from exc
-        if write_error is not None:
-            if codec_option.kind == "rgb":
-                self._write_video_opencv(path, frames, fps)
-                return
-            raise RuntimeError(
-                f"ffmpeg failed while encoding {path.name} with {codec_option.name}: {stderr.strip()}"
-            ) from write_error
-        if return_code != 0:
-            if codec_option.kind == "rgb":
-                self._write_video_opencv(path, frames, fps)
-                return
-            raise RuntimeError(
-                f"ffmpeg failed while encoding {path.name} with {codec_option.name}: {stderr.strip()}"
-            )
+            with av.open(
+                str(path),
+                mode="w",
+                format=codec_option.container_format,
+            ) as container:
+                stream = container.add_stream(
+                    codec_option.pyav_codec,
+                    rate=max(1, int(fps)),
+                    options=codec_option.codec_options or None,
+                )
+                stream.width = int(w)
+                stream.height = int(h)
+                stream.pix_fmt = stream_pix_fmt
 
-    def _write_video_opencv(
-        self,
-        path: Path,
-        frames: list[tuple[float, np.ndarray]],
-        fps: int,
-    ) -> None:
-        h, w = frames[0][1].shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(path), fourcc, fps, (w, h))
-        if not writer.isOpened():
-            raise RuntimeError(f"Cannot open fallback video writer for {path}")
-        try:
-            for _, frame in frames:
-                arr = np.asarray(frame)
-                if arr.ndim == 2:
-                    arr = cv2.cvtColor(arr.astype(np.uint8), cv2.COLOR_GRAY2BGR)
-                writer.write(arr)
-        finally:
-            writer.release()
+                for _, frame in frames:
+                    arr = np.asarray(frame)
+                    if arr.shape[:2] != (h, w):
+                        raise ValueError(
+                            "All frames in one stream must share the same resolution"
+                        )
+                    if arr.dtype != first_frame.dtype:
+                        arr = arr.astype(first_frame.dtype)
+                    av_frame = av.VideoFrame.from_ndarray(arr, format=input_pix_fmt)
+                    if stream.pix_fmt != input_pix_fmt:
+                        av_frame = av_frame.reformat(
+                            width=w,
+                            height=h,
+                            format=stream.pix_fmt,
+                        )
+                    for packet in stream.encode(av_frame):
+                        container.mux(packet)
+
+                for packet in stream.encode():
+                    container.mux(packet)
+        except Exception as exc:
+            raise RuntimeError(
+                "PyAV failed while encoding "
+                f"{path.name} with {codec_option.name} "
+                f"({input_pix_fmt}->{stream_pix_fmt}, {w}x{h})"
+            ) from exc
 
     def _write_parquet(self, path: Path, ep: EpisodeData) -> None:
         timestamps = self._target_timestamps(ep)

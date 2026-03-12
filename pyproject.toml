@@ -8,6 +8,7 @@ version = "1.0.0"
 description = "Timestamp-aligned robot episode collection for VLA/RL training"
 requires-python = ">=3.10"
 dependencies = [
+    "av>=12.0",
     "numpy>=1.24",
     "scipy>=1.11",
     "opencv-python-headless>=4.8",

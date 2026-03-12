@@ -1,14 +1,15 @@
 name: Release
 
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - '*.*.*'
 
 permissions:
   contents: write
 
 jobs:
   build-and-release:
-    if: github.ref_name == 'main'
     runs-on: ubuntu-latest
 
     steps:
@@ -28,6 +29,28 @@ jobs:
           python -m pip install build
           python -m pip install -e .[test]
 
+      - name: Validate release tag
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          if not re.fullmatch(r"\d+\.\d+\.\d+", tag):
+            raise SystemExit(
+                f"Release tag '{tag}' must match the format <major>.<minor>.<patch>."
+            )
+
+          data = tomllib.loads(Path("pyproject.toml").read_text())
+          version = data["project"]["version"]
+          if tag != version:
+            raise SystemExit(
+                f"Release tag '{tag}' does not match project version '{version}'."
+            )
+          PY
+
       - name: Run non-hardware tests
         run: python -m pytest -m "not hardware"
 
@@ -37,33 +60,26 @@ jobs:
       - name: Compute release metadata
         id: release_meta
         run: |
-          version="$(python - <<'PY'
-          import tomllib
-          from pathlib import Path
-          data = tomllib.loads(Path("pyproject.toml").read_text())
-          print(data["project"]["version"])
-          PY
-          )"
-          tag="v${version}-build.${GITHUB_RUN_NUMBER}"
-          last_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
-          if [ -n "$last_tag" ]; then
-            changelog="$(git log "${last_tag}..HEAD" --pretty=format:'- %s (%h)')"
+          tag="${GITHUB_REF_NAME}"
+          previous_tag="$(git tag --merged HEAD --sort=-version:refname | grep -Fxv "$tag" | head -n 1 || true)"
+          if [ -n "$previous_tag" ]; then
+            changelog="$(git log "${previous_tag}..HEAD" --first-parent --pretty=format:'- %s (%h)')"
           else
-            changelog="$(git log HEAD --pretty=format:'- %s (%h)')"
+            changelog="$(git log HEAD --first-parent --pretty=format:'- %s (%h)')"
           fi
           if [ -z "$changelog" ]; then
             changelog="- No changes since the previous release."
           fi
           {
-            echo "version=$version"
+            echo "version=$tag"
             echo "tag=$tag"
-            echo "last_tag=$last_tag"
+            echo "previous_tag=$previous_tag"
           } >> "$GITHUB_OUTPUT"
           {
-            echo "## Rollio ${version}"
+            echo "## Rollio ${tag}"
             echo
-            if [ -n "$last_tag" ]; then
-              echo "Changes since ${last_tag}:"
+            if [ -n "$previous_tag" ]; then
+              echo "Changes since ${previous_tag}:"
             else
               echo "Changes in this release:"
             fi
@@ -77,4 +93,7 @@ jobs:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           name: Rollio ${{ steps.release_meta.outputs.version }}
           body_path: RELEASE_NOTES.md
-          files: dist/*
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          fail_on_unmatched_files: true

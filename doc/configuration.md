@@ -299,6 +299,7 @@ Controls the codecs used when episode videos are exported.
 | `background_workers` | int | `1` | Background export workers |
 
 The setup wizard shows only codecs that are usable on the current machine.
+Availability is probed in-process through PyAV with a tiny encode test per codec.
 For RGB streams, it prefers the best available hardware H.264 encoder first,
 then software H.264, then MPEG-4. Depth/grayscale streams default to
 lossless codecs.
